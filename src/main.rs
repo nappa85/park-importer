@@ -20,6 +20,18 @@ use log::{error, info};
 
 static POOL: Lazy<Pool> = Lazy::new(|| Pool::new(env::var("DATABASE_URL").expect("Missing DATABASE_URL env var")));
 
+fn cmp_f64(a: &f64, b: &f64) -> Ordering {
+    if a < b {
+        Ordering::Less
+    }
+    else if a > b {
+        Ordering::Greater
+    }
+    else {
+        Ordering::Equal
+    }
+}
+
 #[derive(Deserialize)]
 struct OverpassResponse {
     pub elements: Vec<OverpassElement>,
@@ -31,14 +43,18 @@ impl OverpassResponse {
         let mut coords = HashMap::new();
         nodes.into_iter().for_each(|node| match (node.lat, node.lon) {
             (Some(x), Some(y)) => {
-                coords.insert(node.id, format!("({},{})", x, y));
+                coords.insert(node.id, (x, y));
             },
             _ => {},
         });
         elements.into_iter().map(|element| params! {
                 "city_id" => city_id,
-                "name" => element.tags.and_then(|hm| hm.get("name").cloned()).unwrap_or_else(String::new),
-                "coordinates" => element.nodes.map(|n| n.into_iter().map(|id| coords.get(&id).map(|s| s.as_str()).unwrap_or_else(|| "")).collect::<Vec<&str>>().join(",")).unwrap_or_else(String::new),
+                "name" => element.tags.as_ref().and_then(|hm| hm.get("name").cloned()).unwrap_or_else(String::new),
+                "min_x" => element.get_min_x(&coords),
+                "min_y" => element.get_min_y(&coords),
+                "max_x" => element.get_max_x(&coords),
+                "max_y" => element.get_max_y(&coords),
+                "coordinates" => element.nodes.map(|n| n.into_iter().map(|id| coords.get(&id).map(|(x, y)| format!("({},{})", x, y)).unwrap_or_else(String::new)).collect::<Vec<String>>().join(",")).unwrap_or_else(String::new),
             }).collect()
     }
 }
@@ -52,6 +68,52 @@ struct OverpassElement {
     pub tags: Option<HashMap<String, String>>,
     pub lat: Option<f64>,
     pub lon: Option<f64>,
+}
+
+impl OverpassElement {
+    fn get_min_x(&self, coords: &HashMap<u64, (f64, f64)>) -> Option<f64> {
+        self.nodes.as_ref()
+            .and_then(|n| {
+                n.iter()
+                    .map(|id| coords.get(&id).map(|(x, _)| *x))
+                    .filter(Option::is_some)
+                    .map(Option::unwrap)
+                    .min_by(cmp_f64)
+            })
+    }
+
+    fn get_min_y(&self, coords: &HashMap<u64, (f64, f64)>) -> Option<f64> {
+        self.nodes.as_ref()
+            .and_then(|n| {
+                n.iter()
+                    .map(|id| coords.get(&id).map(|(_, y)| *y))
+                    .filter(Option::is_some)
+                    .map(Option::unwrap)
+                    .min_by(cmp_f64)
+            })
+    }
+
+    fn get_max_x(&self, coords: &HashMap<u64, (f64, f64)>) -> Option<f64> {
+        self.nodes.as_ref()
+            .and_then(|n| {
+                n.iter()
+                    .map(|id| coords.get(&id).map(|(x, _)| *x))
+                    .filter(Option::is_some)
+                    .map(Option::unwrap)
+                    .max_by(cmp_f64)
+            })
+    }
+
+    fn get_max_y(&self, coords: &HashMap<u64, (f64, f64)>) -> Option<f64> {
+        self.nodes.as_ref()
+            .and_then(|n| {
+                n.iter()
+                    .map(|id| coords.get(&id).map(|(_, y)| *y))
+                    .filter(Option::is_some)
+                    .map(Option::unwrap)
+                    .max_by(cmp_f64)
+            })
+    }
 }
 
 struct City {
@@ -68,20 +130,12 @@ async fn load_cities() -> Result<HashMap<u16, City>, ()> {
     res.for_each_and_drop(|ref mut row| {
         let id = row.take("id").expect("MySQL city.id error");
         let name = row.take("name").expect("MySQL city.name error");
-        let coords: String = row.take("coordinates").expect("MySQL city.coordinates encoding error");
+        let coords = row.take::<String, _>("coordinates").expect("MySQL city.coordinates encoding error");
+        let coords = coords.trim();
 
-        let poly: Vec<Point<f64>> = coords.trim().split("),(")
+        let poly: Vec<Point<f64>> = (&coords[1..(coords.len() - 2)]).split("),(")
             .map(|s| {
-                let x_y = if s.starts_with("(") {
-                    &s[1..]
-                }
-                else if s.ends_with(")") {
-                    &s[..(s.len() - 1)]
-                }
-                else {
-                    s
-                }
-                    .split(",")
+                let x_y = s.split(",")
                     .map(|s| match s.parse::<f64>() {
                         Ok(f) => f,
                         Err(_) => panic!("Error parsing \"{}\" as a float", s),
@@ -99,18 +153,6 @@ async fn load_cities() -> Result<HashMap<u16, City>, ()> {
     }).await.map_err(|e| error!("MySQL for_each error: {}", e))?;
 
     Ok(cities)
-}
-
-fn cmp_f64(a: &f64, b: &f64) -> Ordering {
-    if a < b {
-        Ordering::Less
-    }
-    else if a > b {
-        Ordering::Greater
-    }
-    else {
-        Ordering::Equal
-    }
 }
 
 async fn load_parks<I: Iterator<Item=(u16, City)>>(cities: I) -> Result<(), ()> {
@@ -186,7 +228,7 @@ out skel qt;", min_y = min_y, min_x = min_x, max_y = max_y, max_x = max_x);
 
                 match POOL.get_conn().await.map_err(|e| error!("MySQL retrieve connection error: {}", e)) {
                     Ok(conn) => {
-                        conn.batch_exec("INSERT INTO city_parks (city_id, name, coordinates, created) VALUES (:city_id, :name, :coordinates, CURDATE())", json.into_params(city_id)).await
+                        conn.batch_exec("INSERT INTO city_parks (city_id, name, min_x, min_y, max_x, max_y, coordinates, created) VALUES (:city_id, :name, :min_x, :min_y, :max_x, :max_y, :coordinates, CURDATE())", json.into_params(city_id)).await
                             .map_err(|e| error!("MySQL insert query error: {}", e))
                             .ok();
                     },
