@@ -131,19 +131,33 @@ async fn load_cities() -> Result<HashMap<u16, City>, ()> {
         let id = row.take("id").expect("MySQL city.id error");
         let name = row.take("name").expect("MySQL city.name error");
         let coords = row.take::<String, _>("coordinates").expect("MySQL city.coordinates encoding error");
-        let coords = coords.trim();
+        let coords = coords.replace(char::is_whitespace, "");
 
-        let poly: Vec<Point<f64>> = (&coords[1..(coords.len() - 2)]).split("),(")
-            .map(|s| {
-                let x_y = s.split(",")
-                    .map(|s| match s.parse::<f64>() {
-                        Ok(f) => f,
-                        Err(_) => panic!("Error parsing \"{}\" as a float", s),
-                    })
-                    .collect::<Vec<f64>>();
-                Point::new(x_y[0], x_y[1])
-            })
-            .collect();
+        let poly: Vec<Point<f64>> = if coords.is_empty() {
+            error!("City \"{}\" ({}) has empty coordinates", name, id);
+            Vec::new()
+        }
+        else {
+            (&coords[1..(coords.len() - 2)]).split("),(")
+                .map(|s| {
+                    let x_y: Vec<f64> = s.split(",")
+                        .map(|s| match s.parse::<f64>() {
+                            Ok(f) => f,
+                            Err(_) => panic!("Error parsing \"{}\" as a float", s),
+                        })
+                        .collect();
+                    if x_y.len() == 2 {
+                        Some(Point::new(x_y[0], x_y[1]))
+                    }
+                    else {
+                        error!("City \"{}\" ({}) has invalid coordinates", name, id);
+                        None
+                    }
+                })
+                .filter(Option::is_some)
+                .map(Option::unwrap)
+                .collect()
+        };
 
         cities.insert(id, City {
             id,
