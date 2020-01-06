@@ -18,3 +18,4 @@ log = "0.4"
 mysql_async = "0.21"
 env_logger = "0.7"
 geo = { version = "0.12", features = ["use-serde"] }
+geo-raycasting = "0.1"

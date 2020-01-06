@@ -16,6 +16,8 @@ use once_cell::sync::Lazy;
 
 use geo::{Point, Polygon};
 
+use geo_raycasting::RayCasting;
+
 use log::{error, info};
 
 static POOL: Lazy<Pool> = Lazy::new(|| Pool::new(env::var("DATABASE_URL").expect("Missing DATABASE_URL env var")));
@@ -38,7 +40,7 @@ struct OverpassResponse {
 }
 
 impl OverpassResponse {
-    fn into_params(self, city_id: u16) -> Vec<Vec<(String, Value)>> {
+    fn into_params(self, city: &City) -> Vec<Vec<(String, Value)>> {
         let (nodes, elements): (Vec<OverpassElement>, Vec<OverpassElement>) = self.elements.into_iter().partition(|e| e.etype == "node");
         let mut coords = HashMap::new();
         nodes.into_iter().for_each(|node| match (node.lat, node.lon) {
@@ -47,15 +49,17 @@ impl OverpassResponse {
             },
             _ => {},
         });
-        elements.into_iter().map(|element| params! {
-                "city_id" => city_id,
-                "name" => element.tags.as_ref().and_then(|hm| hm.get("name").cloned()).unwrap_or_else(String::new),
+        elements.into_iter()
+            .filter(|element| element.nodes.as_ref().map(|nodes| nodes.iter().any(|id| coords.get(&id).map(|xy| city.coordinates.within(&Point::from(*xy))) == Some(true))) == Some(true))
+            .map(|element| params! {
+                "id" => element.id,
+                "city_id" => city.id,
                 "min_x" => element.get_min_x(&coords),
                 "min_y" => element.get_min_y(&coords),
                 "max_x" => element.get_max_x(&coords),
                 "max_y" => element.get_max_y(&coords),
                 "tags" => element.tags.map(|hm| hm.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("\n")),
-                "coordinates" => element.nodes.map(|n| n.into_iter().map(|id| coords.get(&id).map(|(x, y)| format!("({},{})", x, y)).unwrap_or_else(String::new)).collect::<Vec<String>>().join(",")).unwrap_or_else(String::new),
+                "coordinates" => element.nodes.map(|n| n.into_iter().map(|id| coords.get(&id).map(|(x, y)| format!("({},{})", x, y)).unwrap()).collect::<Vec<String>>().join(",")).unwrap_or_else(String::new),
             }).collect()
     }
 }
@@ -123,9 +127,13 @@ struct City {
     pub coordinates: Polygon<f64>,
 }
 
-async fn load_cities() -> Result<HashMap<u16, City>, ()> {
+async fn load_cities(city_ids: Vec<String>) -> Result<HashMap<u16, City>, ()> {
+    let query = format!(
+            "SELECT id, name, coordinates FROM city WHERE scadenza > UNIX_TIMESTAMP(){}",
+            if city_ids.is_empty() { String::new() } else { format!(" AND id IN ({})", city_ids.join(",")) }
+        );
     let conn = POOL.get_conn().await.map_err(|e| error!("MySQL retrieve connection error: {}", e))?;
-    let res = conn.query("SELECT id, name, coordinates FROM city WHERE scadenza > UNIX_TIMESTAMP()").await.map_err(|e| error!("MySQL query error: {}", e))?;
+    let res = conn.query(&query).await.map_err(|e| error!("MySQL query error: {}", e))?;
 
     let mut cities = HashMap::new();
     res.for_each_and_drop(|ref mut row| {
@@ -173,13 +181,13 @@ async fn load_cities() -> Result<HashMap<u16, City>, ()> {
 async fn load_parks<I: Iterator<Item=(u16, City)>>(cities: I) -> Result<(), ()> {
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, Body>(https);
-    FuturesUnordered::from_iter(cities.map(|(id, city)| match (
+    FuturesUnordered::from_iter(cities.map(|(_, city)| match (
                     city.coordinates.exterior().points_iter().map(|p| p.x()).min_by(cmp_f64),
                     city.coordinates.exterior().points_iter().map(|p| p.x()).max_by(cmp_f64),
                     city.coordinates.exterior().points_iter().map(|p| p.y()).min_by(cmp_f64),
                     city.coordinates.exterior().points_iter().map(|p| p.y()).max_by(cmp_f64)
                 ) {
-                (Some(min_x), Some(max_x), Some(min_y), Some(max_y)) => Some((id, city.name, (min_y, min_x, max_y, max_x))),
+                (Some(min_x), Some(max_x), Some(min_y), Some(max_y)) => Some((city, (min_y, min_x, max_y, max_x))),
                 _ => {
                     error!("Skipping city {}", city.name);
                     None
@@ -187,13 +195,16 @@ async fn load_parks<I: Iterator<Item=(u16, City)>>(cities: I) -> Result<(), ()> 
             })
             .filter(Option::is_some)
             .map(Option::unwrap)
-            .map(|(city_id, city_name, (min_y, min_x, max_y, max_x))| {
+            .map(|(city, (min_y, min_x, max_y, max_x))| {
                 let client = &client;
                 let body = format!("data=[out:json][timeout:25];
 (
   node[\"leisure\"]({min_x},{min_y},{max_x},{max_y});
   way[\"leisure\"]({min_x},{min_y},{max_x},{max_y});
   relation[\"leisure\"]({min_x},{min_y},{max_x},{max_y});
+  node[\"nature\"]({min_x},{min_y},{max_x},{max_y});
+  way[\"nature\"]({min_x},{min_y},{max_x},{max_y});
+  relation[\"nature\"]({min_x},{min_y},{max_x},{max_y});
 );
 out body;
 >;
@@ -204,27 +215,27 @@ out skel qt;", min_y = min_y, min_x = min_x, max_y = max_y, max_x = max_x);
                             // .header("User-Agent", "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:71.0) Gecko/20100101 Firefox/71.0")
                             .uri("https://lz4.overpass-api.de/api/interpreter")
                             .body(Body::from(body)) {
-                        Ok(req) => (city_id, city_name, client.request(req).await),
+                        Ok(req) => (city, client.request(req).await),
                         Err(e) => panic!("error building request: {}", e),
                     }
                 }
             }))
-        .for_each(|(city_id, city_name, res)| async move {
+        .for_each_concurrent(None, |(city, res)| async move {
             if let Err(e) = res {
-                error!("error retrieving parks for city \"{}\": {}", city_name, e);
+                error!("error retrieving parks for city \"{}\" ({}): {}", city.name, city.id, e);
                 return;
             }
             let res = res.unwrap();
             if !res.status().is_success() {
-                error!("unsuccessful response while retrieving parks for city \"{}\"", city_name);
+                error!("unsuccessful response while retrieving parks for city \"{}\" ({})", city.name, city.id);
             }
             else {
                 let body = match res.into_body()
                         .map_ok(|c| c.to_vec())
                         .try_concat()
                         .await
-                        .map_err(|e| error!("error while reading parks for city \"{}\": {}", city_name, e))
-                        .and_then(|chunks| String::from_utf8(chunks).map_err(|e| error!("error while encoding parks for city \"{}\": {}", city_name, e))) {
+                        .map_err(|e| error!("error while reading parks for city \"{}\" ({}): {}", city.name, city.id, e))
+                        .and_then(|chunks| String::from_utf8(chunks).map_err(|e| error!("error while encoding parks for city \"{}\" ({}): {}", city.name, city.id, e))) {
                     Ok(s) => s,
                     Err(_) => {
                         return;
@@ -234,16 +245,17 @@ out skel qt;", min_y = min_y, min_x = min_x, max_y = max_y, max_x = max_x);
                 let json: OverpassResponse = match serde_json::from_str(&body) {
                     Ok(json) => json,
                     Err(e) => {
-                        error!("error decoding parks for city \"{}\": {}", city_name, e);
+                        error!("error decoding parks for city \"{}\" ({}): {}", city.name, city.id, e);
                         return;
                     }
                 };
 
-                info!("Found {} parks for city \"{}\"", json.elements.len(), city_name);
+                let parks = json.into_params(&city);
+                info!("Found {} parks for city \"{}\" ({})", parks.len(), city.name, city.id);
 
                 match POOL.get_conn().await.map_err(|e| error!("MySQL retrieve connection error: {}", e)) {
                     Ok(conn) => {
-                        conn.batch_exec("INSERT INTO city_parks (city_id, name, min_x, min_y, max_x, max_y, coordinates, tags, created) VALUES (:city_id, :name, :min_x, :min_y, :max_x, :max_y, :coordinates, :tags, CURDATE())", json.into_params(city_id)).await
+                        conn.batch_exec("REPLACE INTO city_parks (id, city_id, min_x, min_y, max_x, max_y, coordinates, tags, created) VALUES (:id, :city_id, :min_x, :min_y, :max_x, :max_y, :coordinates, :tags, CURDATE())", parks).await
                             .map_err(|e| error!("MySQL insert query error: {}", e))
                             .ok();
                     },
@@ -260,29 +272,9 @@ out skel qt;", min_y = min_y, min_x = min_x, max_y = max_y, max_x = max_x);
 async fn main() -> Result<(), ()> {
     env_logger::init();
 
-    let cities = load_cities().await?;
+    let city_ids: Vec<String> = env::args().skip(1).collect();
 
-    let (conn, ids): (_, Vec<u16>) = POOL.get_conn().await.map_err(|e| error!("MySQL retrieve connection error: {}", e))?
-        .query("SELECT DISTINCT city_id FROM city_parks WHERE created = CURDATE()").await
-        .map_err(|e| error!("MySQL select query error: {}", e))?
-        .collect_and_drop().await
-        .map_err(|e| error!("MySQL cities collect query error: {}", e))?;
+    let cities = load_cities(city_ids).await?;
 
-    if ids.is_empty() {
-        conn.drop_query("TRUNCATE TABLE city_park_stats").await
-            .map_err(|e| error!("MySQL delete query error: {}", e))?
-            .drop_query("TRUNCATE TABLE city_parks").await
-            .map_err(|e| error!("MySQL truncate query error: {}", e))?;
-    }
-    else {
-        info!("Skipping import for {} cities", ids.len());
-
-        let ids = ids.iter().map(|id| id.to_string()).collect::<Vec<String>>().join(",");
-        conn.drop_query(format!("DELETE FROM city_park_stats WHERE park_id IN (SELECT id FROM city_parks WHERE city_id NOT IN ({}))", ids)).await
-            .map_err(|e| error!("MySQL delete query error: {}", e))?
-            .drop_query(format!("DELETE FROM city_parks WHERE city_id NOT IN ({})", ids)).await
-            .map_err(|e| error!("MySQL delete query error: {}", e))?;
-    }
-
-    load_parks(cities.into_iter().filter(|(id, _)| !ids.contains(&id))).await
+    load_parks(cities.into_iter()).await
 }
