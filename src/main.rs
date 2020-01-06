@@ -255,7 +255,7 @@ out skel qt;", min_y = min_y, min_x = min_x, max_y = max_y, max_x = max_x);
 
                 match POOL.get_conn().await.map_err(|e| error!("MySQL retrieve connection error: {}", e)) {
                     Ok(conn) => {
-                        conn.batch_exec("REPLACE INTO city_parks (id, city_id, min_x, min_y, max_x, max_y, coordinates, tags, created) VALUES (:id, :city_id, :min_x, :min_y, :max_x, :max_y, :coordinates, :tags, CURDATE())", parks).await
+                        conn.batch_exec("REPLACE INTO city_parks (id, city_id, min_x, min_y, max_x, max_y, coordinates, tags) VALUES (:id, :city_id, :min_x, :min_y, :max_x, :max_y, :coordinates, :tags)", parks).await
                             .map_err(|e| error!("MySQL insert query error: {}", e))
                             .ok();
                     },
