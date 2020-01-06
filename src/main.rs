@@ -54,6 +54,7 @@ impl OverpassResponse {
                 "min_y" => element.get_min_y(&coords),
                 "max_x" => element.get_max_x(&coords),
                 "max_y" => element.get_max_y(&coords),
+                "tags" => element.tags.map(|hm| hm.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("\n")),
                 "coordinates" => element.nodes.map(|n| n.into_iter().map(|id| coords.get(&id).map(|(x, y)| format!("({},{})", x, y)).unwrap_or_else(String::new)).collect::<Vec<String>>().join(",")).unwrap_or_else(String::new),
             }).collect()
     }
@@ -242,7 +243,7 @@ out skel qt;", min_y = min_y, min_x = min_x, max_y = max_y, max_x = max_x);
 
                 match POOL.get_conn().await.map_err(|e| error!("MySQL retrieve connection error: {}", e)) {
                     Ok(conn) => {
-                        conn.batch_exec("INSERT INTO city_parks (city_id, name, min_x, min_y, max_x, max_y, coordinates, created) VALUES (:city_id, :name, :min_x, :min_y, :max_x, :max_y, :coordinates, CURDATE())", json.into_params(city_id)).await
+                        conn.batch_exec("INSERT INTO city_parks (city_id, name, min_x, min_y, max_x, max_y, coordinates, tags, created) VALUES (:city_id, :name, :min_x, :min_y, :max_x, :max_y, :coordinates, :tags, CURDATE())", json.into_params(city_id)).await
                             .map_err(|e| error!("MySQL insert query error: {}", e))
                             .ok();
                     },
