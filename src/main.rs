@@ -202,9 +202,9 @@ async fn load_parks<I: Iterator<Item=(u16, City)>>(cities: I) -> Result<(), ()> 
   node[\"leisure\"]({min_x},{min_y},{max_x},{max_y});
   way[\"leisure\"]({min_x},{min_y},{max_x},{max_y});
   relation[\"leisure\"]({min_x},{min_y},{max_x},{max_y});
-  node[\"nature\"]({min_x},{min_y},{max_x},{max_y});
-  way[\"nature\"]({min_x},{min_y},{max_x},{max_y});
-  relation[\"nature\"]({min_x},{min_y},{max_x},{max_y});
+  node[\"natural\"]({min_x},{min_y},{max_x},{max_y});
+  way[\"natural\"]({min_x},{min_y},{max_x},{max_y});
+  relation[\"natural\"]({min_x},{min_y},{max_x},{max_y});
 );
 out body;
 >;
