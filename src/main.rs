@@ -197,18 +197,20 @@ async fn load_parks<I: Iterator<Item=(u16, City)>>(cities: I) -> Result<(), ()> 
             .map(Option::unwrap)
             .map(|(city, (min_y, min_x, max_y, max_x))| {
                 let client = &client;
-                let body = format!("data=[out:json][timeout:25];
+                let body = format!(r#"data=[out:json][bbox:{min_x},{min_y},{max_x},{max_y}];
 (
-  node[\"leisure\"]({min_x},{min_y},{max_x},{max_y});
-  way[\"leisure\"]({min_x},{min_y},{max_x},{max_y});
-  relation[\"leisure\"]({min_x},{min_y},{max_x},{max_y});
-  node[\"natural\"]({min_x},{min_y},{max_x},{max_y});
-  way[\"natural\"]({min_x},{min_y},{max_x},{max_y});
-  relation[\"natural\"]({min_x},{min_y},{max_x},{max_y});
+    way["leisure"="park"];
+    way["leisure"="recreation_ground"];
+    way["leisure"="pitch"];
+    way["leisure"="playground"];
+    way["leisure"="golf_course"];
+    way["landuse"="recreation_ground"];
+    way["landuse"="meadow"];
+    way["landuse"="grass"];
 );
 out body;
 >;
-out skel qt;", min_y = min_y, min_x = min_x, max_y = max_y, max_x = max_x);
+out skel qt;"#, min_y = min_y, min_x = min_x, max_y = max_y, max_x = max_x);
                 async move {
                     match Request::builder()
                             .method("POST")
