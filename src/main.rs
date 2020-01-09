@@ -197,7 +197,10 @@ async fn load_parks<I: Iterator<Item=(u16, City)>>(cities: I) -> Result<(), ()> 
             .map(Option::unwrap)
             .map(|(city, (min_y, min_x, max_y, max_x))| {
                 let client = &client;
-                let body = format!(r#"data=[out:json][bbox:{min_x},{min_y},{max_x},{max_y}];
+                let body = format!(r#"data=[out:json]
+[timeout:620]
+[bbox:{min_x},{min_y},{max_x},{max_y}]
+[date:"2019-02-16T00:00:00Z"];
 (
     way["leisure"="park"];
     way["leisure"="recreation_ground"];
@@ -214,8 +217,7 @@ out skel qt;"#, min_y = min_y, min_x = min_x, max_y = max_y, max_x = max_x);
                 async move {
                     match Request::builder()
                             .method("POST")
-                            // .header("User-Agent", "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:71.0) Gecko/20100101 Firefox/71.0")
-                            .uri("https://lz4.overpass-api.de/api/interpreter")
+                            .uri("https://overpass-api.de/api/interpreter")
                             .body(Body::from(body)) {
                         Ok(req) => (city, client.request(req).await),
                         Err(e) => panic!("error building request: {}", e),
@@ -229,7 +231,7 @@ out skel qt;"#, min_y = min_y, min_x = min_x, max_y = max_y, max_x = max_x);
             }
             let res = res.unwrap();
             if !res.status().is_success() {
-                error!("unsuccessful response while retrieving parks for city \"{}\" ({})", city.name, city.id);
+                error!("unsuccessful response while retrieving parks for city \"{}\" ({}): {}", city.name, city.id, res.status().as_u16());
             }
             else {
                 let body = match res.into_body()
